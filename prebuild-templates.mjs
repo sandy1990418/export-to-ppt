@@ -135,7 +135,8 @@ function parseFieldDefinition(fieldDef) {
             const objectStart = fieldDef.indexOf('z.object(');
             if (objectStart !== -1) {
                 const afterObjectKeyword = fieldDef.substring(objectStart + 'z.object('.length);
-                const innerContent = extractBalancedContent('{' + afterObjectKeyword, '{', '}');
+                // afterObjectKeyword starts with '{' already, so extract content directly
+                const innerContent = extractBalancedContent(afterObjectKeyword, '{', '}');
 
                 if (innerContent) {
                     const innerSchema = parseObjectContent(innerContent);

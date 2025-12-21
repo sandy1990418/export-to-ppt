@@ -1,1 +1,1 @@
-TEMP
+node prebuild-templates.mjs 
