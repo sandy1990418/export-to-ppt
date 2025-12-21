@@ -1,9 +1,10 @@
 import path from "path";
 import fs from "fs";
-import puppeteer from "puppeteer";
+import { Page } from "puppeteer";
 
 import { sanitizeFilename } from "@/app/(presentation-generator)/utils/others";
 import { NextResponse, NextRequest } from "next/server";
+import { puppeteerPool } from "@/lib/puppeteer-pool";
 
 function getAbsoluteAppDataDirectory(): string {
   const appDataDir = process.env.APP_DATA_DIRECTORY || "app_data";
@@ -21,117 +22,128 @@ function getAbsoluteAppDataDirectory(): string {
 }
 
 export async function POST(req: NextRequest) {
-  const { id, title } = await req.json();
-  if (!id) {
-    return NextResponse.json(
-      { error: "Missing Presentation ID" },
-      { status: 400 }
-    );
-  }
+  let page: Page | null = null;
 
-  console.log("[PDF Export] Starting export for id:", id);
-
-  const browser = await puppeteer.launch({
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-web-security",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--disable-features=TranslateUI",
-      "--disable-ipc-flooding-protection",
-    ],
-    protocolTimeout: 300000,
-  });
-
-  const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 720 });
-  page.setDefaultNavigationTimeout(300000);
-  page.setDefaultTimeout(300000);
-
-  console.log("[PDF Export] Navigating to pdf-maker page...");
-
-  // Use networkidle2 and longer timeout for JS chunks to load
-  await page.goto(`http://localhost:3000/pdf-maker?id=${id}`, {
-    waitUntil: "networkidle2",
-    timeout: 120000,
-  });
-
-  // Wait for React hydration
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-  console.log("[PDF Export] Page loaded, waiting for slides...");
-
-  // Wait for slides to be rendered
-  const maxWaitTime = 120000;
-  const pollInterval = 3000;
-  const startTime = Date.now();
-  let slidesFound = false;
-
-  while (Date.now() - startTime < maxWaitTime) {
-    const slideCount = await page.evaluate(() => {
-      const wrapper = document.querySelector("#presentation-slides-wrapper");
-      const slides = wrapper
-        ? wrapper.querySelectorAll("[data-speaker-note]")
-        : [];
-      return slides.length;
-    });
-
-    if (slideCount > 0) {
-      slidesFound = true;
-      console.log(`[PDF Export] Found ${slideCount} slides`);
-      break;
+  try {
+    const { id, title } = await req.json();
+    if (!id) {
+      return NextResponse.json(
+        { error: "Missing Presentation ID" },
+        { status: 400 }
+      );
     }
 
-    await new Promise((resolve) => setTimeout(resolve, pollInterval));
-  }
+    console.log("[PDF Export] Starting export for id:", id);
+    const startTime = Date.now();
 
-  if (!slidesFound) {
-    console.error("[PDF Export] Timeout waiting for slides");
-    await browser.close();
+    page = await puppeteerPool.getPage();
+    console.log(
+      `[PDF Export] Got page from pool in ${Date.now() - startTime}ms`
+    );
+
+    // Ensure JavaScript is enabled
+    await page.setJavaScriptEnabled(true);
+
+    // Clear all browser state for fresh page
+    const cdpClient = await page.createCDPSession();
+    await Promise.all([
+      cdpClient.send("Network.clearBrowserCache"),
+      cdpClient.send("Network.clearBrowserCookies"),
+      cdpClient.send("Storage.clearDataForOrigin", {
+        origin: "http://localhost:3000",
+        storageTypes: "all",
+      }),
+    ]);
+
+    console.log("[PDF Export] Navigating to pdf-maker page...");
+
+    // Use networkidle2 and longer timeout for JS chunks to load
+    await page.goto(`http://localhost:3000/pdf-maker?id=${id}`, {
+      waitUntil: "networkidle2",
+      timeout: 120000,
+    });
+
+    // Wait for React hydration
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    console.log("[PDF Export] Page loaded, waiting for slides...");
+
+    // Wait for slides to be rendered
+    const maxWaitTime = 120000;
+    const pollInterval = 3000;
+    const navStartTime = Date.now();
+    let slidesFound = false;
+
+    while (Date.now() - navStartTime < maxWaitTime) {
+      const slideCount = await page.evaluate(() => {
+        const wrapper = document.querySelector("#presentation-slides-wrapper");
+        const slides = wrapper
+          ? wrapper.querySelectorAll("[data-speaker-note]")
+          : [];
+        return slides.length;
+      });
+
+      if (slideCount > 0) {
+        slidesFound = true;
+        console.log(`[PDF Export] Found ${slideCount} slides`);
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    if (!slidesFound) {
+      console.error("[PDF Export] Timeout waiting for slides");
+      await puppeteerPool.releasePage(page);
+      return NextResponse.json(
+        { error: "Timeout waiting for slides to render" },
+        { status: 500 }
+      );
+    }
+
+    // Extra wait for images and fonts to load
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    console.log("[PDF Export] Generating PDF...");
+
+    const pdfBuffer = await page.pdf({
+      width: "1280px",
+      height: "720px",
+      printBackground: true,
+      margin: { top: 0, right: 0, bottom: 0, left: 0 },
+    });
+
+    await puppeteerPool.releasePage(page);
+    page = null;
+
+    const sanitizedTitle = sanitizeFilename(title ?? "presentation");
+    const appDataDirectory = getAbsoluteAppDataDirectory();
+
+    console.log("[PDF Export] Using app data directory:", appDataDirectory);
+
+    const destinationPath = path.join(
+      appDataDirectory,
+      "exports",
+      `${sanitizedTitle}.pdf`
+    );
+
+    await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.promises.writeFile(destinationPath, pdfBuffer);
+
+    console.log("[PDF Export] PDF saved to:", destinationPath);
+
+    return NextResponse.json({
+      success: true,
+      path: destinationPath,
+    });
+  } catch (error: any) {
+    console.error("[PDF Export] Error:", error);
+    if (page) {
+      await puppeteerPool.releasePage(page);
+    }
     return NextResponse.json(
-      { error: "Timeout waiting for slides to render" },
+      { error: `PDF export failed: ${error.message}` },
       { status: 500 }
     );
   }
-
-  // Extra wait for images and fonts to load
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-
-  console.log("[PDF Export] Generating PDF...");
-
-  const pdfBuffer = await page.pdf({
-    width: "1280px",
-    height: "720px",
-    printBackground: true,
-    margin: { top: 0, right: 0, bottom: 0, left: 0 },
-  });
-
-  await browser.close();
-
-  const sanitizedTitle = sanitizeFilename(title ?? "presentation");
-  const appDataDirectory = getAbsoluteAppDataDirectory();
-
-  console.log("[PDF Export] Using app data directory:", appDataDirectory);
-
-  const destinationPath = path.join(
-    appDataDirectory,
-    "exports",
-    `${sanitizedTitle}.pdf`
-  );
-
-  await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
-  await fs.promises.writeFile(destinationPath, pdfBuffer);
-
-  console.log("[PDF Export] PDF saved to:", destinationPath);
-
-  return NextResponse.json({
-    success: true,
-    path: destinationPath,
-  });
 }
