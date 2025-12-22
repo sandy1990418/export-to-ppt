@@ -689,57 +689,47 @@ async def generate_presentation_handler(
             await sql_session.commit()
 
         image_generation_service = ImageGenerationService(get_images_directory())
-        async_assets_generation_tasks = []
 
-        # 7. Generate slide content concurrently (batched), then build slides and fetch assets
+        # 7. Generate slide content using PARALLEL async calls
         slides: List[SlideModel] = []
 
         slide_layout_indices = presentation_structure.slides
         slide_layouts = [layout_model.slides[idx] for idx in slide_layout_indices]
 
-        # Schedule slide content generation and asset fetching in batches of 10
-        batch_size = 10
-        for start in range(0, len(slide_layouts), batch_size):
-            end = min(start + batch_size, len(slide_layouts))
+        print(f"[PARALLEL] Generating {len(slide_layouts)} slides in parallel")
+        parallel_start_time = asyncio.get_event_loop().time()
 
-            print(f"Generating slides from {start} to {end}")
+        # Create all content generation tasks
+        content_tasks = [
+            get_slide_content_from_type_and_outline(
+                slide_layouts[i],
+                presentation_outlines.slides[i],
+                request.language,
+                request.tone.value,
+                request.verbosity.value,
+                request.instructions,
+            )
+            for i in range(len(slide_layouts))
+        ]
 
-            # Generate contents for this batch concurrently
-            content_tasks = [
-                get_slide_content_from_type_and_outline(
-                    slide_layouts[i],
-                    presentation_outlines.slides[i],
-                    request.language,
-                    request.tone.value,
-                    request.verbosity.value,
-                    request.instructions,
-                )
-                for i in range(start, end)
-            ]
-            batch_contents: List[dict] = await asyncio.gather(*content_tasks)
+        # Execute all LLM calls in parallel
+        all_slide_contents = await asyncio.gather(*content_tasks)
 
-            # Build slides for this batch
-            batch_slides: List[SlideModel] = []
-            for offset, slide_content in enumerate(batch_contents):
-                i = start + offset
-                slide_layout = slide_layouts[i]
-                slide = SlideModel(
-                    presentation=presentation_id,
-                    layout_group=layout_model.name,
-                    layout=slide_layout.id,
-                    index=i,
-                    speaker_note=slide_content.get("__speaker_note__"),
-                    content=slide_content,
-                )
-                slides.append(slide)
-                batch_slides.append(slide)
+        parallel_elapsed = asyncio.get_event_loop().time() - parallel_start_time
+        print(f"[PARALLEL] All {len(slide_layouts)} slides generated in {parallel_elapsed:.2f}s")
 
-            # Start asset fetch tasks for just-generated slides so they run while next batch is processed
-            asset_tasks = [
-                process_slide_and_fetch_assets(image_generation_service, slide)
-                for slide in batch_slides
-            ]
-            async_assets_generation_tasks.extend(asset_tasks)
+        # Build all slides from generated content
+        for i, slide_content in enumerate(all_slide_contents):
+            slide_layout = slide_layouts[i]
+            slide = SlideModel(
+                presentation=presentation_id,
+                layout_group=layout_model.name,
+                layout=slide_layout.id,
+                index=i,
+                speaker_note=slide_content.get("__speaker_note__"),
+                content=slide_content,
+            )
+            slides.append(slide)
 
         if async_status:
             async_status.message = "Fetching assets for slides"
@@ -747,8 +737,19 @@ async def generate_presentation_handler(
             sql_session.add(async_status)
             await sql_session.commit()
 
-        # Run all asset tasks concurrently while batches may still be generating content
-        generated_assets_list = await asyncio.gather(*async_assets_generation_tasks)
+        # 8. Fetch ALL assets in parallel (not batched) for maximum speed
+        print(f"[ASSETS] Starting parallel asset fetch for {len(slides)} slides")
+        asset_start_time = asyncio.get_event_loop().time()
+
+        asset_tasks = [
+            process_slide_and_fetch_assets(image_generation_service, slide)
+            for slide in slides
+        ]
+        generated_assets_list = await asyncio.gather(*asset_tasks)
+
+        asset_elapsed = asyncio.get_event_loop().time() - asset_start_time
+        print(f"[ASSETS] All assets fetched in {asset_elapsed:.2f}s")
+
         generated_assets = []
         for assets_list in generated_assets_list:
             generated_assets.extend(assets_list)
