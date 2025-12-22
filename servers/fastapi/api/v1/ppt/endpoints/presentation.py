@@ -15,6 +15,7 @@ from sqlmodel import select
 from constants.presentation import DEFAULT_TEMPLATES
 from enums.webhook_event import WebhookEvent
 from models.api_error_model import APIErrorModel
+from models.direct_presentation_request import DirectPresentationRequest, DirectSlideInput
 from models.generate_presentation_request import GeneratePresentationRequest
 from models.presentation_and_path import PresentationPathAndEditPath
 from models.presentation_from_template import EditPresentationRequest
@@ -441,6 +442,115 @@ async def export_presentation_as_pptx_or_pdf(
     return PresentationPathAndEditPath(
         **presentation_and_path.model_dump(),
         edit_path=f"/presentation?id={id}",
+    )
+
+
+@PRESENTATION_ROUTER.post("/create-direct", response_model=PresentationPathAndEditPath)
+async def create_presentation_direct(
+    request: DirectPresentationRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a presentation directly from pre-generated schema data.
+    No LLM processing - just save to DB and export.
+    """
+    presentation_id = str(uuid.uuid4())
+
+    # Validate template exists
+    if request.template not in DEFAULT_TEMPLATES:
+        template_key = request.template.lower()
+        if not template_key.startswith("custom-"):
+            raise HTTPException(
+                status_code=400,
+                detail="Template not found. Please use a valid template.",
+            )
+        template_id = template_key.replace("custom-", "")
+        try:
+            template = await sql_session.get(TemplateModel, uuid.UUID(template_id))
+            if not template:
+                raise Exception()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Template not found. Please use a valid template.",
+            )
+
+    # Get layout info for the template
+    layout = await get_layout_by_name(request.template)
+    if not layout:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Layout not found for template: {request.template}",
+        )
+
+    # Build layout ID to index mapping
+    layout_id_to_index = {slide.id: idx for idx, slide in enumerate(layout.slides)}
+
+    # Build outlines and structure from slides
+    outline_slides = []
+    structure_indices = []
+    for slide_input in request.slides:
+        # Create outline entry (use title from data if available, else layout id)
+        content = slide_input.data.get("title", slide_input.layout)
+        outline_slides.append(SlideOutlineModel(content=content))
+
+        # Find layout index
+        layout_index = layout_id_to_index.get(slide_input.layout)
+        if layout_index is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Layout '{slide_input.layout}' not found in '{request.template}' template. Available: {list(layout_id_to_index.keys())}",
+            )
+        structure_indices.append(layout_index)
+
+    presentation_outline = PresentationOutlineModel(slides=outline_slides)
+    presentation_structure = PresentationStructureModel(slides=structure_indices)
+
+    # Create presentation record
+    presentation = PresentationModel(
+        id=presentation_id,
+        content="",  # No content needed for direct creation
+        n_slides=len(request.slides),
+        language=request.language,
+        title=request.title,
+        layout=layout.model_dump(),
+        outlines=presentation_outline.model_dump(mode="json"),
+        structure=presentation_structure.model_dump(mode="json"),
+    )
+    sql_session.add(presentation)
+
+    # Create slide records
+    slides_to_add = []
+    for index, slide_input in enumerate(request.slides):
+        slide = SlideModel(
+            id=str(uuid.uuid4()),
+            presentation=presentation_id,
+            layout_group=request.template,
+            layout=slide_input.layout,
+            index=index,
+            content=slide_input.data,
+            speaker_note=slide_input.speaker_note or "",  # Ensure not None for frontend rendering
+            properties={},
+        )
+        slides_to_add.append(slide)
+
+    sql_session.add_all(slides_to_add)
+    await sql_session.commit()
+
+    # Export if requested
+    export_path = None
+    if request.export_as:
+        presentation_and_path = await export_presentation(
+            presentation_id,
+            request.title,
+            request.export_as,
+        )
+        export_path = presentation_and_path.path
+
+    return PresentationPathAndEditPath(
+        presentation_id=presentation_id,
+        path=export_path,
+        edit_path=f"/presentation?id={presentation_id}",
     )
 
 
