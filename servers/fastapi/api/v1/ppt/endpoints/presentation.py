@@ -66,6 +66,7 @@ from utils.process_slides import (
     process_slide_add_placeholder_assets,
     process_slide_and_fetch_assets,
 )
+from utils.base64_image_utils import process_base64_images_in_dict
 import uuid
 
 
@@ -522,6 +523,9 @@ async def create_presentation_direct(
     # Create slide records
     slides_to_add = []
     for index, slide_input in enumerate(request.slides):
+        # Process base64 images in slide data before saving
+        process_base64_images_in_dict(slide_input.data)
+
         slide = SlideModel(
             id=str(uuid.uuid4()),
             presentation=presentation_id,
