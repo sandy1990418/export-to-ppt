@@ -219,36 +219,32 @@ async def check_google_font_availability(font_name: str) -> bool:
     """
     Check if a font is available in Google Fonts.
 
+    Note: This function is disabled for offline mode.
+    All fonts are now treated as locally available.
+
     Args:
         font_name: Name of the font to check
 
     Returns:
-        True if font is available in Google Fonts, False otherwise
+        Always returns False in offline mode (fonts should be provided locally)
     """
-    try:
-        formatted_name = font_name.replace(" ", "+")
-        url = f"https://fonts.googleapis.com/css2?family={formatted_name}&display=swap"
-
-        async with aiohttp.ClientSession() as session:
-            async with session.head(
-                url, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                return response.status == 200
-
-    except Exception as e:
-        print(f"Error checking Google Font availability for {font_name}: {e}")
-        return False
+    # Offline mode: skip Google Fonts check, return False to indicate
+    # the font should be handled locally
+    return False
 
 
 async def analyze_fonts_in_all_slides(slide_xmls: List[str]) -> FontAnalysisResult:
     """
-    Analyze fonts across all slides and determine Google Fonts availability.
+    Analyze fonts across all slides.
+
+    Note: In offline mode, all fonts are returned as "not supported" (meaning they
+    need to be provided locally). No Google Fonts URLs are generated.
 
     Args:
         slide_xmls: List of OXML content strings from all slides
 
     Returns:
-        FontAnalysisResult with supported and unsupported fonts
+        FontAnalysisResult with fonts found in the slides
     """
     # Extract fonts from all slides
     raw_fonts = set()
@@ -264,25 +260,12 @@ async def analyze_fonts_in_all_slides(slide_xmls: List[str]) -> FontAnalysisResu
     if not normalized_fonts:
         return FontAnalysisResult(internally_supported_fonts=[], not_supported_fonts=[])
 
-    # Check each normalized font's availability in Google Fonts concurrently
-    tasks = [check_google_font_availability(font) for font in normalized_fonts]
-    results = await asyncio.gather(*tasks)
-
-    internally_supported_fonts = []
-    not_supported_fonts = []
-
-    for font, is_available in zip(normalized_fonts, results):
-        if is_available:
-            formatted_name = font.replace(" ", "+")
-            google_fonts_url = f"https://fonts.googleapis.com/css2?family={formatted_name}&display=swap"
-            internally_supported_fonts.append(
-                {"name": font, "google_fonts_url": google_fonts_url}
-            )
-        else:
-            not_supported_fonts.append(font)
-
+    # Offline mode: all fonts should be provided locally
+    # Return empty internally_supported_fonts and list all fonts as not_supported
+    # so they can be uploaded by the user
     return FontAnalysisResult(
-        internally_supported_fonts=internally_supported_fonts, not_supported_fonts=[]
+        internally_supported_fonts=[],
+        not_supported_fonts=list(normalized_fonts)
     )
 
 
