@@ -35,6 +35,7 @@ from models.pptx_models import (
     PptxTextRunModel,
 )
 from utils.download_helpers import download_files
+from utils.asset_directory_utils import get_absolute_app_data_directory
 from utils.image_utils import (
     clip_image,
     create_circle_image,
@@ -70,6 +71,9 @@ class PptxPresentationCreator:
         image_urls = []
         models_with_network_asset: List[PptxPictureBoxModel] = []
 
+        # Get the actual absolute path to app_data directory
+        app_data_dir = get_absolute_app_data_directory()
+
         if self._ppt_model.shapes:
             for each_shape in self._ppt_model.shapes:
                 if isinstance(each_shape, PptxPictureBoxModel):
@@ -78,12 +82,19 @@ class PptxPresentationCreator:
                         if "app_data/" in image_path:
                             relative_path = image_path.split("app_data/")[1]
                             each_shape.picture.path = os.path.join(
-                                "/app_data", relative_path
+                                app_data_dir, relative_path
                             )
                             each_shape.picture.is_network = False
                             continue
                         image_urls.append(image_path)
                         models_with_network_asset.append(each_shape)
+                    elif image_path.startswith("/app_data/"):
+                        # Handle paths like /app_data/images/xxx
+                        relative_path = image_path[len("/app_data/"):]
+                        each_shape.picture.path = os.path.join(
+                            app_data_dir, relative_path
+                        )
+                        each_shape.picture.is_network = False
 
         for each_slide in self._slide_models:
             for each_shape in each_slide.shapes:
@@ -93,12 +104,19 @@ class PptxPresentationCreator:
                         if "app_data" in image_path:
                             relative_path = image_path.split("app_data/")[1]
                             each_shape.picture.path = os.path.join(
-                                "/app_data", relative_path
+                                app_data_dir, relative_path
                             )
                             each_shape.picture.is_network = False
                             continue
                         image_urls.append(image_path)
                         models_with_network_asset.append(each_shape)
+                    elif image_path.startswith("/app_data/"):
+                        # Handle paths like /app_data/images/xxx
+                        relative_path = image_path[len("/app_data/"):]
+                        each_shape.picture.path = os.path.join(
+                            app_data_dir, relative_path
+                        )
+                        each_shape.picture.is_network = False
 
         if image_urls:
             image_paths = await download_files(image_urls, self._temp_dir)
@@ -176,6 +194,12 @@ class PptxPresentationCreator:
 
     def add_picture(self, slide: Slide, picture_model: PptxPictureBoxModel):
         image_path = picture_model.picture.path
+
+        # Check if the image file exists
+        if not os.path.exists(image_path):
+            print(f"Warning: Image file not found: {image_path}")
+            return
+
         if (
             picture_model.clip
             or picture_model.border_radius
@@ -186,8 +210,8 @@ class PptxPresentationCreator:
         ):
             try:
                 image = Image.open(image_path)
-            except Exception:
-                print(f"Could not open image: {image_path}")
+            except Exception as e:
+                print(f"Could not open image: {image_path}, error: {e}")
                 return
 
             image = image.convert("RGBA")
@@ -218,11 +242,19 @@ class PptxPresentationCreator:
             image_path = os.path.join(self._temp_dir, f"{uuid.uuid4()}.png")
             image.save(image_path)
 
+        # Final check before adding to slide
+        if not os.path.exists(image_path):
+            print(f"Warning: Processed image file not found: {image_path}")
+            return
+
         margined_position = self.get_margined_position(
             picture_model.position, picture_model.margin
         )
 
-        slide.shapes.add_picture(image_path, *margined_position.to_pt_list())
+        try:
+            slide.shapes.add_picture(image_path, *margined_position.to_pt_list())
+        except Exception as e:
+            print(f"Error adding picture to slide: {image_path}, error: {e}")
 
     def add_autoshape(self, slide: Slide, autoshape_box_model: PptxAutoShapeBoxModel):
         position = autoshape_box_model.position
@@ -235,6 +267,8 @@ class PptxPresentationCreator:
 
         textbox = autoshape.text_frame
         textbox.word_wrap = autoshape_box_model.text_wrap
+        # Disable auto-fit to prevent text overflow issues
+        textbox.auto_size = None
 
         self.apply_fill_to_shape(autoshape, autoshape_box_model.fill)
         self.apply_margin_to_text_box(textbox, autoshape_box_model.margin)
@@ -248,10 +282,11 @@ class PptxPresentationCreator:
     def add_textbox(self, slide: Slide, textbox_model: PptxTextBoxModel):
         position = textbox_model.position
         textbox_shape = slide.shapes.add_textbox(*position.to_pt_list())
-        textbox_shape.width += Pt(2)
 
         textbox = textbox_shape.text_frame
         textbox.word_wrap = textbox_model.text_wrap
+        # Disable auto-fit to prevent text overflow issues
+        textbox.auto_size = None
 
         self.apply_fill_to_shape(textbox_shape, textbox_model.fill)
         self.apply_margin_to_text_box(textbox, textbox_model.margin)
