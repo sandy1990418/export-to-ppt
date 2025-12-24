@@ -117,13 +117,16 @@ async function getPageForPresentation(id: string): Promise<Page> {
     waitUntil: "networkidle2",
     timeout: 120000,
   });
-  console.log(
-    "[Puppeteer] Initial page load complete, waiting for hydration..."
-  );
+  console.log("[Puppeteer] Initial page load complete, reloading for stable render..."); 
+  // console.log(
+  //   "[Puppeteer] Initial page load complete, waiting for hydration..."
+  // );
 
   // Wait extra time for React hydration to complete
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
+  // await new Promise((resolve) => setTimeout(resolve, 5000));
+  await page.reload({ waitUntil: "networkidle2", timeout: 60000 });  
+  await new Promise((resolve) => setTimeout(resolve, 2000));       
+  console.log("[Puppeteer] Page reloaded, waiting for hydration...");
   console.log("[Puppeteer] Page loaded, waiting for slides...");
 
   // Wait for slides to be rendered

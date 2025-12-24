@@ -6,6 +6,10 @@ from pptx.util import Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR_TYPE
 
+class PptxStructureModel(BaseModel):
+    level: int = 0
+    isList: bool = False
+
 
 class PptxBoxShapeEnum(Enum):
     RECTANGLE = "rectangle"
@@ -117,6 +121,7 @@ class PptxTextBoxModel(PptxShapeModel):
     position: PptxPositionModel
     text_wrap: bool = True
     paragraphs: List[PptxParagraphModel]
+    structure: Optional[PptxStructureModel]=None
 
 
 class PptxAutoShapeBoxModel(PptxShapeModel):

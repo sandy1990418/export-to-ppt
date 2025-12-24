@@ -73,6 +73,10 @@ export interface ElementAttributes {
     sepia?: number;
     opacity?: number;
   };
+  structure?: {
+    level: number;
+    isList: boolean;
+  };
 }
 
 export interface SlideAttributesResult {

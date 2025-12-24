@@ -282,6 +282,36 @@ export async function extractSlideAttributesBatch(
       }
       return Object.keys(filters).length > 0 ? filters : undefined;
     }
+    function shouldSkipExport(el: Element): boolean {
+      const exportAttr = el.getAttribute("data-export");
+      if (exportAttr && exportAttr.toLowerCase() === "false") return true;
+      return !!el.closest('[data-export="false"]');
+    }
+
+    function getListItemLevel(listItem: Element, root: Element): number {
+      let level = 0;
+      let current: Element | null = listItem;
+      while (current && current !== root) {
+        if (current.tagName.toLowerCase() === "li") {
+          level += 1;
+        }
+        current = current.parentElement;
+      }
+      return level;
+    }
+
+    function hasNestedList(listItem: Element): boolean {
+      return !!listItem.querySelector(":scope > ul, :scope > ol");
+    }
+
+    function parseStructure(el: Element, root: Element) {
+      const listItem = el.tagName.toLowerCase() === "li" ? el : el.closest("li");
+      if (!listItem || !root.contains(listItem)) return undefined;
+      return {
+        level: getListItemLevel(listItem, root),
+        isList: hasNestedList(listItem),
+      };
+    }
 
     function getElementPath(el: Element, root: Element): string {
       const path: string[] = [];
@@ -361,6 +391,7 @@ export async function extractSlideAttributesBatch(
         textWrap: computedStyles.whiteSpace !== "nowrap",
         should_screenshot: needsScreenshot,
         filters: parseFilters(computedStyles),
+        structure: parseStructure(el, root),
         _elementPath: needsScreenshot ? getElementPath(el, root) : undefined,
         _skipChildren: skipChildren,
       };
@@ -390,6 +421,7 @@ export async function extractSlideAttributesBatch(
 
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
+        if (shouldSkipExport(child)) continue;
         const attrs = parseElementAttributes(child, root);
         const tagName = attrs.tagName;
 
