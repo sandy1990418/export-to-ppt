@@ -138,7 +138,8 @@ function convertToTextBox(element: ElementAttributes): PptxTextBoxModel {
     fill,
     position,
     text_wrap: element.textWrap ?? true,
-    paragraphs: [paragraph]
+    paragraphs: [paragraph],
+    structure: element.structure
   };
 }
 

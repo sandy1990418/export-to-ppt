@@ -267,6 +267,11 @@ export interface PptxParagraphModel {
   text_runs?: PptxTextRunModel[];
 }
 
+export interface PptxStructureModel {
+  level: number;
+  isList: boolean;
+}
+
 export interface PptxObjectFitModel {
   fit?: PptxObjectFitEnum;
   focus?: [number | null, number | null];
@@ -287,6 +292,7 @@ export interface PptxTextBoxModel extends PptxShapeModel {
   position: PptxPositionModel;
   text_wrap: boolean;
   paragraphs: PptxParagraphModel[];
+  structure?: PptxStructureModel;
 }
 
 export interface PptxAutoShapeBoxModel extends PptxShapeModel {

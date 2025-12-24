@@ -292,7 +292,8 @@ export async function extractSlideAttributesBatch(
       let level = 0;
       let current: Element | null = listItem;
       while (current && current !== root) {
-        if (current.tagName.toLowerCase() === "li") {
+        const tagName = current.tagName.toLowerCase();
+        if (tagName === "ul" || tagName === "ol") {
           level += 1;
         }
         current = current.parentElement;
@@ -304,7 +305,15 @@ export async function extractSlideAttributesBatch(
       return !!listItem.querySelector(":scope > ul, :scope > ol");
     }
 
-    function parseStructure(el: Element, root: Element) {
+    function getDirectListItemText(listItem: Element): string | undefined {
+      const clone = listItem.cloneNode(true) as Element;
+      clone.querySelectorAll("ul, ol").forEach((node) => node.remove());
+      const text = (clone.textContent || "").trim();
+      return text ? text : undefined;
+    }
+
+    function parseStructure(el: Element, root: Element, innerText?: string) {
+      if (!innerText || !innerText.trim()) return undefined;
       const listItem = el.tagName.toLowerCase() === "li" ? el : el.closest("li");
       if (!listItem || !root.contains(listItem)) return undefined;
       return {
@@ -346,7 +355,9 @@ export async function extractSlideAttributesBatch(
       let innerText: string | undefined;
       let skipChildren = false;  // Flag to skip recursion for inline-only paragraphs
       const allowedInlineTags = new Set(["strong", "u", "em", "code", "s"]);
-      if (tagName === "p") {
+      if (tagName === "li") {
+        innerText = getDirectListItemText(el);
+      } else if (tagName === "p") {
         const innerTags = Array.from(el.querySelectorAll("*")).map(e => e.tagName.toLowerCase());
         if (innerTags.length > 0 && innerTags.every(t => allowedInlineTags.has(t))) {
           innerText = el.innerHTML;
@@ -391,7 +402,7 @@ export async function extractSlideAttributesBatch(
         textWrap: computedStyles.whiteSpace !== "nowrap",
         should_screenshot: needsScreenshot,
         filters: parseFilters(computedStyles),
-        structure: parseStructure(el, root),
+        structure: parseStructure(el, root, innerText),
         _elementPath: needsScreenshot ? getElementPath(el, root) : undefined,
         _skipChildren: skipChildren,
       };
