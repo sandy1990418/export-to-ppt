@@ -1254,20 +1254,33 @@ async def export_from_markdown(
     - --- forces a new slide
     - Max 8 bullet points per slide, then auto-splits
 
+    Set use_llm=true for LLM-assisted intelligent slide splitting (better for messy markdown).
+
     Example input:
     {
         "markdown": "# My Presentation\\n\\n## Slide 1\\n- Point A\\n- Point B",
         "title": "Optional Override Title",
-        "export_as": "pptx"
+        "export_as": "pptx",
+        "use_llm": false
     }
     """
     # Convert markdown to schema
     md_converter = MarkdownToSchemaConverter()
-    schema_request = md_converter.convert(
-        markdown=request.markdown,
-        export_as=request.export_as,
-        title=request.title,
-    )
+
+    if request.use_llm:
+        # Use LLM for intelligent slide splitting
+        schema_request = await md_converter.convert_with_llm(
+            markdown=request.markdown,
+            export_as=request.export_as,
+            title=request.title,
+        )
+    else:
+        # Use rule-based splitting
+        schema_request = md_converter.convert(
+            markdown=request.markdown,
+            export_as=request.export_as,
+            title=request.title,
+        )
 
     presentation_id = str(uuid.uuid4())
 

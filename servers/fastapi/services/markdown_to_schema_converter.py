@@ -1,5 +1,6 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional
 import mistune
+from pydantic import BaseModel, Field
 
 from models.markdown_models import ParsedBlock
 from models.pptx_models import PptxStructureModel
@@ -9,6 +10,41 @@ from models.schema_export_request import (
     SchemaExportRequest,
     SchemaSlideInput,
 )
+from models.llm_message import LLMSystemMessage, LLMUserMessage
+from services.llm_client import LLMClient
+from utils.llm_provider import get_model
+
+
+# Response schema for LLM slide grouping
+class SlideGroupItem(BaseModel):
+    """A single content item within a slide."""
+
+    content: str = Field(..., description="The text content of this item")
+    level: int = Field(
+        default=0, description="Nesting level (0=top level, 1=nested, etc.)"
+    )
+    is_list: bool = Field(default=True, description="Whether this is a list item")
+
+
+class SlideGroup(BaseModel):
+    """A group of content that belongs to one slide."""
+
+    title: str = Field(default="", description="The slide title (mainTitle)")
+    items: List[SlideGroupItem] = Field(
+        default_factory=list, description="Content items for this slide"
+    )
+    tables: List[str] = Field(
+        default_factory=list, description="Markdown tables for this slide"
+    )
+
+
+class SlideGroupingResponse(BaseModel):
+    """LLM response for how to group content into slides."""
+
+    presentation_title: str = Field(..., description="The presentation title")
+    slides: List[SlideGroup] = Field(
+        ..., min_length=1, description="List of slides with grouped content"
+    )
 
 
 class MarkdownToSchemaConverter:
@@ -23,7 +59,7 @@ class MarkdownToSchemaConverter:
     def convert(
         self, markdown: str, export_as: str = "pptx", title: Optional[str] = None
     ) -> SchemaExportRequest:
-        """Convert markdown to SchemaExportRequest."""
+        """Convert markdown to SchemaExportRequest using rule-based splitting."""
         # 1. Parse markdown to AST
         ast = self.markdown_parser(markdown)
 
@@ -41,7 +77,7 @@ class MarkdownToSchemaConverter:
         if not extracted_title:
             extracted_title = "Untitled Presentation"
 
-        # 4. Split blocks into slides intelligently
+        # 4. Split blocks into slides using rules
         slides = self._split_into_slides(blocks)
 
         # 5. Build SchemaExportRequest
@@ -50,6 +86,151 @@ class MarkdownToSchemaConverter:
             slides=slides,
             export_as=export_as,
         )
+
+    async def convert_with_llm(
+        self, markdown: str, export_as: str = "pptx", title: Optional[str] = None
+    ) -> SchemaExportRequest:
+        """Convert markdown to SchemaExportRequest using LLM-assisted splitting."""
+        # 1. Parse markdown to AST
+        ast = self.markdown_parser(markdown)
+
+        # 2. Process AST to extract structured blocks
+        blocks = self._process_ast(ast)
+
+        # 3. Extract title from first heading if not provided
+        extracted_title = title
+        if not extracted_title and blocks:
+            for block in blocks:
+                if block.type == "title" and block.level == 1:
+                    extracted_title = block.content
+                    break
+
+        # 4. Use LLM to decide how to group blocks into slides
+        slide_grouping = await self._llm_split_into_slides(blocks, extracted_title)
+
+        # 5. Use LLM response title if no title was provided
+        if not extracted_title:
+            extracted_title = slide_grouping.presentation_title or "Untitled Presentation"
+
+        # 6. Convert LLM response to SchemaSlideInput list
+        slides = self._build_slides_from_llm_response(slide_grouping)
+
+        # 7. Build SchemaExportRequest
+        return SchemaExportRequest(
+            title=extracted_title,
+            slides=slides,
+            export_as=export_as,
+        )
+
+    async def _llm_split_into_slides(
+        self, blocks: List[ParsedBlock], title: Optional[str]
+    ) -> SlideGroupingResponse:
+        """Use LLM to intelligently group blocks into slides."""
+        # Prepare content description for LLM
+        content_items = []
+        for i, block in enumerate(blocks):
+            if block.type == "title" and block.level == 1:
+                content_items.append(f"[{i}] PRESENTATION_TITLE: {block.content}")
+            elif block.type == "title":
+                content_items.append(
+                    f"[{i}] HEADING_L{block.level}: {block.content}"
+                )
+            elif block.type == "bullet":
+                indent = "  " * block.level
+                content_items.append(f"[{i}] BULLET (level={block.level}): {indent}{block.content}")
+            elif block.type == "table":
+                # Truncate long tables for LLM context
+                table_preview = block.content[:200] + "..." if len(block.content) > 200 else block.content
+                content_items.append(f"[{i}] TABLE:\n{table_preview}")
+            elif block.type == "paragraph":
+                content_items.append(f"[{i}] PARAGRAPH: {block.content}")
+            elif block.type == "thematic_break":
+                content_items.append(f"[{i}] --- (page break)")
+
+        content_text = "\n".join(content_items)
+
+        system_prompt = """You are an expert presentation designer. Your task is to organize markdown content into well-structured presentation slides.
+
+Guidelines for slide organization:
+1. Each slide should have a clear focus on ONE topic or idea
+2. Keep 3-8 bullet points per slide (split if more content)
+3. Group related content together
+4. Use thematic breaks (---) as strong hints for slide boundaries
+5. Level 2 headings (##) typically start new slides
+6. Tables should stay with their related content
+7. Preserve the hierarchical structure (nested bullets)
+8. If content is too long for one slide, split it logically and add "(cont.)" to the title
+
+Output the grouped content using the exact text from the input items.
+Do NOT modify or rephrase the content - use it exactly as provided."""
+
+        user_prompt = f"""Organize the following markdown content into presentation slides.
+
+Content items:
+{content_text}
+
+{"Suggested presentation title: " + title if title else ""}
+
+Group these items into slides. Each slide should have:
+- A title (from headings or create a descriptive one)
+- Content items (bullets, paragraphs)
+- Any associated tables
+
+Return your response as a JSON object with the slide groupings."""
+
+        client = LLMClient()
+        response = await client.generate_structured(
+            model=get_model(),
+            messages=[
+                LLMSystemMessage(content=system_prompt),
+                LLMUserMessage(content=user_prompt),
+            ],
+            response_format=SlideGroupingResponse.model_json_schema(),
+            strict=False,
+        )
+
+        return SlideGroupingResponse(**response)
+
+    def _build_slides_from_llm_response(
+        self, grouping: SlideGroupingResponse
+    ) -> List[SchemaSlideInput]:
+        """Convert LLM slide grouping response to SchemaSlideInput list."""
+        slides = []
+
+        for slide_group in grouping.slides:
+            # Build bullet items
+            bullets = []
+            for item in slide_group.items:
+                bullets.append(
+                    BulletItem(
+                        text=item.content,
+                        structure=PptxStructureModel(
+                            level=item.level, isList=item.is_list
+                        ),
+                    )
+                )
+
+            # Build bullet point content
+            bullet_point = None
+            if bullets:
+                bullet_point = BulletPointContent(
+                    title="",
+                    description=bullets,
+                )
+
+            # Build slide
+            slide = SchemaSlideInput(
+                mainTitle=slide_group.title if slide_group.title else None,
+                bulletPoint=bullet_point,
+                tables=slide_group.tables if slide_group.tables else None,
+            )
+            slides.append(slide)
+
+        # Ensure at least one slide
+        if not slides:
+            slides.append(SchemaSlideInput(mainTitle="Empty Presentation"))
+
+        return slides
 
     def _process_ast(self, ast: list) -> List[ParsedBlock]:
         """Process mistune AST and extract structured blocks."""
@@ -176,7 +357,7 @@ class MarkdownToSchemaConverter:
         return "\n".join(lines) if lines else ""
 
     def _split_into_slides(self, blocks: List[ParsedBlock]) -> List[SchemaSlideInput]:
-        """Split blocks into slides intelligently."""
+        """Split blocks into slides using rule-based logic."""
         slides = []
         current_slide = self._create_empty_slide_data()
         bullet_count = 0

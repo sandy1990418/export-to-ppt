@@ -19,3 +19,7 @@ class MarkdownExportRequest(BaseModel):
         None, description="Optional title, otherwise extract from first # in markdown"
     )
     export_as: Literal["pptx", "pdf"] = Field(default="pptx", description="Export format")
+    use_llm: bool = Field(
+        default=False,
+        description="Use LLM for intelligent slide splitting (slower but better for messy markdown)",
+    )
