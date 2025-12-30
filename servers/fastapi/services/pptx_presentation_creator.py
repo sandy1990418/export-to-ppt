@@ -34,6 +34,7 @@ from models.pptx_models import (
     PptxSpacingModel,
     PptxStrokeModel,
     PptxStructureModel,
+    PptxTableModel,
     PptxTextBoxModel,
     PptxTextRunModel,
 )
@@ -223,6 +224,8 @@ class PptxPresentationCreator:
             self._add_textbox(slide, shape)
         elif isinstance(shape, PptxConnectorModel):
             self._add_connector(slide, shape)
+        elif isinstance(shape, PptxTableModel):
+            self._add_table(slide, shape)
 
     def _add_textbox(self, slide: Slide, model: PptxTextBoxModel):
         """
@@ -273,21 +276,11 @@ class PptxPresentationCreator:
             slide: Target slide.
             model: Picture box model.
 
-        處理流程：
-        1. 計算最終放置位置（含 margin 調整）
-        2. 依據最終位置尺寸處理圖片（裁切/縮放）
-        3. 將處理後的圖片放入 PPT
-
-        修正的問題：
-        - object_fit 存在但 fit 為 null 時，fallback 到 clip
-        - 圖片處理與放置使用相同尺寸，避免不匹配
         """
         image_path = model.picture.path
 
-        # 1. 先計算最終放置位置（含 margin），確保圖片處理與放置尺寸一致
         final_position = self._get_margined_position(model.position, model.margin)
 
-        # 2. 判斷是否需要圖片處理
         needs_processing = (
             model.clip
             or model.border_radius
@@ -303,7 +296,6 @@ class PptxPresentationCreator:
             except Exception:
                 return
 
-            # 3. 處理圖片尺寸：object_fit 優先，否則使用 clip
             if model.object_fit and model.object_fit.fit:
                 # object_fit.fit 有明確值時才使用 fit_image
                 image = fit_image(
@@ -313,14 +305,12 @@ class PptxPresentationCreator:
                     model.object_fit,
                 )
             elif model.clip:
-                # 預設裁切行為
                 image = clip_image(
                     image,
                     final_position.width,
                     final_position.height,
                 )
 
-            # 4. 其他圖片效果處理
             if model.border_radius:
                 image = round_image_corners(image, model.border_radius)
             if model.shape == PptxBoxShapeEnum.CIRCLE:
@@ -330,11 +320,9 @@ class PptxPresentationCreator:
             if model.opacity:
                 image = set_image_opacity(image, model.opacity)
 
-            # 5. 儲存處理後的圖片
             image_path = os.path.join(self._temp_dir, f"{uuid.uuid4()}.png")
             image.save(image_path)
 
-        # 6. 將圖片加入投影片
         slide.shapes.add_picture(image_path, *final_position.to_pt_list())
 
     def _add_connector(self, slide: Slide, model: PptxConnectorModel):
@@ -353,6 +341,67 @@ class PptxPresentationCreator:
         shape.line.width = Pt(model.thickness)
         shape.line.color.rgb = RGBColor.from_string(model.color)
         self._set_fill_opacity(shape, model.opacity)
+
+    def _add_table(self, slide: Slide, model: PptxTableModel):
+        """
+        Add a table shape to a slide.
+
+        Args:
+            slide: Target slide.
+            model: Table model containing rows of cells.
+        """
+        if not model.rows:
+            return
+
+        num_rows = len(model.rows)
+        num_cols = len(model.rows[0]) if model.rows else 0
+
+        if num_rows == 0 or num_cols == 0:
+            return
+
+        # Create table with position
+        table_shape = slide.shapes.add_table(
+            num_rows,
+            num_cols,
+            Pt(model.position.left),
+            Pt(model.position.top),
+            Pt(model.position.width),
+            Pt(model.position.height),
+        )
+        table = table_shape.table
+
+        # Default fonts
+        default_font = model.font or PptxFontModel(name="Inter", size=12, color="000000")
+        header_font = model.header_font or PptxFontModel(
+            name="Inter", size=12, color="FFFFFF", font_weight=700
+        )
+
+        # Populate cells
+        for row_idx, row in enumerate(model.rows):
+            is_header = model.header_row and row_idx == 0
+
+            for col_idx, cell_model in enumerate(row):
+                if col_idx >= num_cols:
+                    break
+
+                cell = table.cell(row_idx, col_idx)
+                cell.text = cell_model.text
+
+                # Apply cell fill
+                if is_header and model.header_fill:
+                    cell.fill.solid()
+                    cell.fill.fore_color.rgb = RGBColor.from_string(model.header_fill.color)
+                elif not is_header and model.cell_fill:
+                    cell.fill.solid()
+                    cell.fill.fore_color.rgb = RGBColor.from_string(model.cell_fill.color)
+
+                # Apply font to paragraphs
+                font_model = header_font if is_header else default_font
+                for paragraph in cell.text_frame.paragraphs:
+                    paragraph.font.name = font_model.name
+                    paragraph.font.size = Pt(font_model.size)
+                    paragraph.font.color.rgb = RGBColor.from_string(font_model.color)
+                    paragraph.font.bold = font_model.font_weight >= 600 if font_model.font_weight else False
 
     # ==================== Paragraph / TextRun ====================
 

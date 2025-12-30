@@ -18,6 +18,7 @@ from models.api_error_model import APIErrorModel
 from models.direct_presentation_request import DirectPresentationRequest, DirectSlideInput
 from models.generate_presentation_request import GeneratePresentationRequest
 from models.presentation_and_path import PresentationPathAndEditPath
+from models.schema_export_request import SchemaExportRequest
 from models.presentation_from_template import EditPresentationRequest
 from models.presentation_outline_model import (
     PresentationOutlineModel,
@@ -48,6 +49,9 @@ from services.temp_file_service import TEMP_FILE_SERVICE
 from services.concurrent_service import CONCURRENT_SERVICE
 from models.sql.presentation import PresentationModel
 from services.pptx_presentation_creator import PptxPresentationCreator
+from services.schema_to_pptx_converter import SchemaToPptxConverter
+from utils.pptx_to_pdf import convert_pptx_to_pdf
+from pathvalidate import sanitize_filename
 from models.sql.async_presentation_generation_status import (
     AsyncPresentationGenerationTaskModel,
 )
@@ -1129,8 +1133,104 @@ async def generate_from_outline(
 
     # Ensure no conflicting params
     request.content = None # Content ignored when outlines provided, but let's be safe
-    
+
     (presentation_id,) = await check_if_api_request_is_valid(request, sql_session)
     return await generate_presentation_handler(
         request, presentation_id, None, sql_session
+    )
+
+
+@PRESENTATION_ROUTER.post("/export-from-schema", response_model=PresentationPathAndEditPath)
+async def export_from_schema(
+    request: SchemaExportRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Export a presentation from schema with text and tables.
+
+    This endpoint bypasses the frontend and directly generates PPTX/PDF
+    from a schema containing:
+    - mainTitle: Slide title
+    - bulletPoint: Object with title and description array
+    - table: Markdown table string
+
+    Example input:
+    {
+        "title": "My Presentation",
+        "slides": [
+            {
+                "mainTitle": "Slide 1",
+                "bulletPoint": {
+                    "title": "Key Points",
+                    "description": ["Point A", "Point B"]
+                },
+                "table": "| Col1 | Col2 |\\n|---|---|\\n| A | B |"
+            }
+        ],
+        "export_as": "pptx"
+    }
+    """
+    presentation_id = str(uuid.uuid4())
+
+    # Convert schema request to PPTX model
+    converter = SchemaToPptxConverter()
+    pptx_model = converter.convert(request)
+
+    # Create temp directory for processing
+    temp_dir = TEMP_FILE_SERVICE.create_temp_dir()
+
+    # Create the PPTX file
+    pptx_creator = PptxPresentationCreator(pptx_model, temp_dir)
+    await pptx_creator.create_ppt()
+
+    # Save to exports directory
+    export_directory = get_exports_directory()
+    safe_title = sanitize_filename(request.title or str(uuid.uuid4()))
+
+    if request.export_as == "pptx":
+        export_path = os.path.join(export_directory, f"{safe_title}.pptx")
+        pptx_creator.save(export_path)
+        public_path = f"/app_data/exports/{safe_title}.pptx"
+    else:
+        # Save PPTX first, then convert to PDF
+        pptx_path = os.path.join(temp_dir, f"{safe_title}.pptx")
+        pptx_creator.save(pptx_path)
+
+        # Convert to PDF using LibreOffice
+        pdf_path = await convert_pptx_to_pdf(pptx_path, export_directory)
+        pdf_filename = os.path.basename(pdf_path)
+        public_path = f"/app_data/exports/{pdf_filename}"
+
+    # Save to database
+    presentation = PresentationModel(
+        id=presentation_id,
+        content="",
+        n_slides=len(request.slides),
+        language="en",
+        title=request.title,
+    )
+    sql_session.add(presentation)
+
+    # Create slide records
+    slides_to_add = []
+    for index, slide_input in enumerate(request.slides):
+        slide = SlideModel(
+            id=str(uuid.uuid4()),
+            presentation=presentation_id,
+            layout_group="schema-export",
+            layout="text-table-layout",
+            index=index,
+            content=slide_input.model_dump(),
+            speaker_note="",
+            properties={},
+        )
+        slides_to_add.append(slide)
+
+    sql_session.add_all(slides_to_add)
+    await sql_session.commit()
+
+    return PresentationPathAndEditPath(
+        presentation_id=presentation_id,
+        path=public_path,
+        edit_path=f"/presentation?id={presentation_id}",
     )

@@ -111,7 +111,7 @@ class PptxPictureModel(BaseModel):
 
 
 class PptxShapeModel(BaseModel):
-    shape_type: Literal["textbox", "autoshape", "picture", "connector"]
+    shape_type: Literal["textbox", "autoshape", "picture", "connector", "table"]
 
 
 class PptxTextBoxModel(PptxShapeModel):
@@ -159,6 +159,21 @@ class PptxConnectorModel(PptxShapeModel):
     opacity: float = 1.0
 
 
+class PptxTableCellModel(BaseModel):
+    text: str
+
+
+class PptxTableModel(PptxShapeModel):
+    shape_type: Literal["table"] = "table"
+    position: PptxPositionModel
+    rows: List[List[PptxTableCellModel]]
+    header_row: bool = True
+    font: Optional[PptxFontModel] = None
+    header_font: Optional[PptxFontModel] = None
+    cell_fill: Optional[PptxFillModel] = None
+    header_fill: Optional[PptxFillModel] = None
+
+
 class PptxSlideModel(BaseModel):
     background: Optional[PptxFillModel] = None
     note: Optional[str] = None
@@ -167,6 +182,7 @@ class PptxSlideModel(BaseModel):
         | PptxAutoShapeBoxModel
         | PptxConnectorModel
         | PptxPictureBoxModel
+        | PptxTableModel
     ]
 
 
