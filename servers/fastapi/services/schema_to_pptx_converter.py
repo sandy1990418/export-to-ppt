@@ -1,7 +1,7 @@
-from typing import List
+from typing import List, Union
 from pptx.enum.text import PP_ALIGN
 
-from models.schema_export_request import SchemaExportRequest, SchemaSlideInput
+from models.schema_export_request import BulletItem, SchemaExportRequest, SchemaSlideInput
 from models.pptx_models import (
     PptxFillModel,
     PptxFontModel,
@@ -10,6 +10,7 @@ from models.pptx_models import (
     PptxPresentationModel,
     PptxSlideModel,
     PptxSpacingModel,
+    PptxStructureModel,
     PptxTableCellModel,
     PptxTableModel,
     PptxTextBoxModel,
@@ -40,6 +41,7 @@ BULLET_ITEM_TOP = 170
 BULLET_ITEM_FONT_SIZE = 18
 BULLET_ITEM_COLOR = "555555"
 BULLET_ITEM_SPACING = 30
+BULLET_LEVEL_INDENT = 20  # Additional indent per nesting level
 
 # Table styling
 TABLE_MARGIN_TOP = 40
@@ -92,17 +94,43 @@ class SchemaToPptxConverter:
 
         # Add bullet point if present
         if slide_input.bulletPoint:
-            # Add bullet title
+            # Add bullet title with structure (level=1, isList=False)
             if slide_input.bulletPoint.title:
-                bullet_title_shape = self._create_bullet_title_textbox(
-                    slide_input.bulletPoint.title, current_top
+                bullet_title_item = BulletItem(
+                    text=slide_input.bulletPoint.title,
+                    structure=PptxStructureModel(level=1, isList=False),
+                )
+                bullet_title_shape = self._create_bullet_item_textbox(
+                    bullet_title_item, current_top
                 )
                 shapes.append(bullet_title_shape)
-                current_top = BULLET_ITEM_TOP
+                current_top += BULLET_ITEM_SPACING
 
             # Add bullet items
+            base_level = 2  # Description items start at level 2
             for item in slide_input.bulletPoint.description:
-                item_shape = self._create_bullet_item_textbox(item, current_top)
+                # If item is a string, convert to BulletItem with level=2
+                if isinstance(item, str):
+                    bullet_item = BulletItem(
+                        text=item,
+                        structure=PptxStructureModel(level=base_level, isList=True),
+                    )
+                elif item.structure is None:
+                    # If BulletItem has no structure, default to level=2
+                    bullet_item = BulletItem(
+                        text=item.text,
+                        structure=PptxStructureModel(level=base_level, isList=True),
+                    )
+                else:
+                    # Adjust level: add base_level to existing structure level
+                    adjusted_level = base_level + item.structure.level
+                    bullet_item = BulletItem(
+                        text=item.text,
+                        structure=PptxStructureModel(
+                            level=adjusted_level, isList=item.structure.isList
+                        ),
+                    )
+                item_shape = self._create_bullet_item_textbox(bullet_item, current_top)
                 shapes.append(item_shape)
                 current_top += BULLET_ITEM_SPACING
 
@@ -168,18 +196,45 @@ class SchemaToPptxConverter:
             ],
         )
 
-    def _create_bullet_item_textbox(self, text: str, top: int) -> PptxTextBoxModel:
-        """Create a bullet item textbox."""
+    def _create_bullet_item_textbox(
+        self, item: Union[str, BulletItem], top: int
+    ) -> PptxTextBoxModel:
+        """Create a bullet item textbox with optional structure-based indentation."""
+        # Extract text and structure from item
+        if isinstance(item, str):
+            text = item
+            structure = None
+        else:
+            text = item.text
+            structure = item.structure
+
+        # Calculate indentation based on structure level
+        level = structure.level if structure else 0
+        base_indent = 20
+        level_indent = level * BULLET_LEVEL_INDENT
+        total_indent = base_indent + level_indent
+
+        # Determine bullet prefix based on isList
+        is_list = structure.isList if structure else True
+        if is_list:
+            # Use different bullet symbols for different levels
+            bullet_symbols = ["•", "◦", "▪", "▫"]
+            bullet = bullet_symbols[min(level, len(bullet_symbols) - 1)]
+            display_text = f"{bullet} {text}"
+        else:
+            # No bullet for non-list items (like headings converted to bullets)
+            display_text = text
+
         return PptxTextBoxModel(
             position=PptxPositionModel(
-                left=MARGIN_LEFT + 20,  # Indent for bullet items
+                left=MARGIN_LEFT + total_indent,
                 top=top,
-                width=CONTENT_WIDTH - 20,
+                width=CONTENT_WIDTH - total_indent,
                 height=30,
             ),
             paragraphs=[
                 PptxParagraphModel(
-                    text=f"• {text}",
+                    text=display_text,
                     alignment=PP_ALIGN.LEFT,
                     font=PptxFontModel(
                         name="Inter",
@@ -189,6 +244,7 @@ class SchemaToPptxConverter:
                     ),
                 )
             ],
+            structure=structure,
         )
 
     def _create_tables_with_layout(

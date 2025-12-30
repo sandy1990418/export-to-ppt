@@ -18,7 +18,9 @@ from models.api_error_model import APIErrorModel
 from models.direct_presentation_request import DirectPresentationRequest, DirectSlideInput
 from models.generate_presentation_request import GeneratePresentationRequest
 from models.presentation_and_path import PresentationPathAndEditPath
+from models.markdown_models import MarkdownExportRequest
 from models.schema_export_request import SchemaExportRequest
+from services.markdown_to_schema_converter import MarkdownToSchemaConverter
 from models.presentation_from_template import EditPresentationRequest
 from models.presentation_outline_model import (
     PresentationOutlineModel,
@@ -1218,6 +1220,103 @@ async def export_from_schema(
             id=str(uuid.uuid4()),
             presentation=presentation_id,
             layout_group="schema-export",
+            layout="text-table-layout",
+            index=index,
+            content=slide_input.model_dump(),
+            speaker_note="",
+            properties={},
+        )
+        slides_to_add.append(slide)
+
+    sql_session.add_all(slides_to_add)
+    await sql_session.commit()
+
+    return PresentationPathAndEditPath(
+        presentation_id=presentation_id,
+        path=public_path,
+        edit_path=f"/presentation?id={presentation_id}",
+    )
+
+
+@PRESENTATION_ROUTER.post("/export-from-markdown", response_model=PresentationPathAndEditPath)
+async def export_from_markdown(
+    request: MarkdownExportRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Export a presentation from markdown content.
+
+    Converts markdown to slides intelligently:
+    - # H1 becomes the presentation title
+    - ## H2 starts a new slide with mainTitle
+    - Bullet lists become bullet points with structure
+    - Tables are preserved as markdown tables
+    - --- forces a new slide
+    - Max 8 bullet points per slide, then auto-splits
+
+    Example input:
+    {
+        "markdown": "# My Presentation\\n\\n## Slide 1\\n- Point A\\n- Point B",
+        "title": "Optional Override Title",
+        "export_as": "pptx"
+    }
+    """
+    # Convert markdown to schema
+    md_converter = MarkdownToSchemaConverter()
+    schema_request = md_converter.convert(
+        markdown=request.markdown,
+        export_as=request.export_as,
+        title=request.title,
+    )
+
+    presentation_id = str(uuid.uuid4())
+
+    # Convert schema request to PPTX model
+    converter = SchemaToPptxConverter()
+    pptx_model = converter.convert(schema_request)
+
+    # Create temp directory for processing
+    temp_dir = TEMP_FILE_SERVICE.create_temp_dir()
+
+    # Create the PPTX file
+    pptx_creator = PptxPresentationCreator(pptx_model, temp_dir)
+    await pptx_creator.create_ppt()
+
+    # Save to exports directory
+    export_directory = get_exports_directory()
+    safe_title = sanitize_filename(schema_request.title or str(uuid.uuid4()))
+
+    if request.export_as == "pptx":
+        export_path = os.path.join(export_directory, f"{safe_title}.pptx")
+        pptx_creator.save(export_path)
+        public_path = f"/app_data/exports/{safe_title}.pptx"
+    else:
+        # Save PPTX first, then convert to PDF
+        pptx_path = os.path.join(temp_dir, f"{safe_title}.pptx")
+        pptx_creator.save(pptx_path)
+
+        # Convert to PDF using LibreOffice
+        pdf_path = await convert_pptx_to_pdf(pptx_path, export_directory)
+        pdf_filename = os.path.basename(pdf_path)
+        public_path = f"/app_data/exports/{pdf_filename}"
+
+    # Save to database
+    presentation = PresentationModel(
+        id=presentation_id,
+        content=request.markdown,
+        n_slides=len(schema_request.slides),
+        language="en",
+        title=schema_request.title,
+    )
+    sql_session.add(presentation)
+
+    # Create slide records
+    slides_to_add = []
+    for index, slide_input in enumerate(schema_request.slides):
+        slide = SlideModel(
+            id=str(uuid.uuid4()),
+            presentation=presentation_id,
+            layout_group="markdown-export",
             layout="text-table-layout",
             index=index,
             content=slide_input.model_dump(),

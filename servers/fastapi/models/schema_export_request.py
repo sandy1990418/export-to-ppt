@@ -1,11 +1,25 @@
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel, Field
+
+from models.pptx_models import PptxStructureModel
+
+
+class BulletItem(BaseModel):
+    """A bullet item with text and optional structure info."""
+
+    text: str = Field(..., description="Text content of the bullet item")
+    structure: Optional[PptxStructureModel] = Field(
+        None, description="Structure info for nested lists"
+    )
 
 
 class BulletPointContent(BaseModel):
     """A bullet point with title and description items."""
-    title: str = Field(..., description="Title of the bullet point")
-    description: List[str] = Field(default_factory=list, description="List of sub-points")
+
+    title: str = Field(default="", description="Title of the bullet point")
+    description: List[Union[str, BulletItem]] = Field(
+        default_factory=list, description="List of sub-points (string or BulletItem)"
+    )
 
 
 class SchemaSlideInput(BaseModel):

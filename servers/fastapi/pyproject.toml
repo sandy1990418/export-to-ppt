@@ -32,6 +32,7 @@ dependencies = [
     "starlette",
     "uvicorn",
     "greenlet>=3.0.0",
+    "mistune>=3.0.0",
 ]
 
 [[tool.uv.index]]
