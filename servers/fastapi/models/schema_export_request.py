@@ -9,10 +9,11 @@ class BulletPointContent(BaseModel):
 
 
 class SchemaSlideInput(BaseModel):
-    """Input for a single slide with text and optional table."""
+    """Input for a single slide with text and optional tables."""
     mainTitle: Optional[str] = Field(None, description="Main title of the slide")
     bulletPoint: Optional[BulletPointContent] = Field(None, description="Bullet point with title and sub-points")
-    table: Optional[str] = Field(None, description="Markdown table string")
+    table: Optional[str] = Field(None, description="Single markdown table (backward compatible)")
+    tables: Optional[List[str]] = Field(None, description="Multiple markdown tables (1=full width, 2=side by side, 3+=stacked)")
 
 
 class SchemaExportRequest(BaseModel):

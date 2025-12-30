@@ -106,11 +106,19 @@ class SchemaToPptxConverter:
                 shapes.append(item_shape)
                 current_top += BULLET_ITEM_SPACING
 
-        # Add table if present
-        if slide_input.table:
-            table_shape = self._create_table(slide_input.table, current_top + TABLE_MARGIN_TOP)
-            if table_shape:
-                shapes.append(table_shape)
+        # Collect all tables (support both 'table' and 'tables')
+        all_tables: List[str] = []
+        if slide_input.tables:
+            all_tables.extend(slide_input.tables)
+        elif slide_input.table:
+            all_tables.append(slide_input.table)
+
+        # Add tables with automatic layout
+        if all_tables:
+            table_shapes = self._create_tables_with_layout(
+                all_tables, current_top + TABLE_MARGIN_TOP
+            )
+            shapes.extend(table_shapes)
 
         return PptxSlideModel(shapes=shapes)
 
@@ -183,8 +191,71 @@ class SchemaToPptxConverter:
             ],
         )
 
-    def _create_table(self, markdown_table: str, top: int) -> PptxTableModel | None:
-        """Create a table from markdown table string."""
+    def _create_tables_with_layout(
+        self, markdown_tables: List[str], top: int
+    ) -> List[PptxTableModel]:
+        """
+        Create tables with automatic layout based on count.
+
+        Layout rules:
+        - 1 table: full width
+        - 2 tables: side by side (two columns)
+        - 3+ tables: stacked vertically
+        """
+        table_count = len(markdown_tables)
+
+        if table_count == 0:
+            return []
+
+        if table_count == 1:
+            # Single table: full width
+            table = self._create_table(
+                markdown_tables[0], top, MARGIN_LEFT, CONTENT_WIDTH
+            )
+            return [table] if table else []
+
+        if table_count == 2:
+            # Two tables: side by side
+            gap = 20  # Gap between columns
+            column_width = (CONTENT_WIDTH - gap) // 2
+            tables = []
+
+            # Left table
+            left_table = self._create_table(
+                markdown_tables[0], top, MARGIN_LEFT, column_width
+            )
+            if left_table:
+                tables.append(left_table)
+
+            # Right table
+            right_table = self._create_table(
+                markdown_tables[1], top, MARGIN_LEFT + column_width + gap, column_width
+            )
+            if right_table:
+                tables.append(right_table)
+
+            return tables
+
+        # 3+ tables: stacked vertically
+        tables = []
+        current_top = top
+        for markdown_table in markdown_tables:
+            table = self._create_table(
+                markdown_table, current_top, MARGIN_LEFT, CONTENT_WIDTH
+            )
+            if table:
+                tables.append(table)
+                # Calculate next position based on table height
+                parsed_rows = parse_markdown_table(markdown_table)
+                table_height = len(parsed_rows) * TABLE_ROW_HEIGHT if parsed_rows else 0
+                current_top += table_height + 20  # 20px gap between tables
+
+        return tables
+
+    def _create_table(
+        self, markdown_table: str, top: int, left: int, width: int
+    ) -> PptxTableModel | None:
+        """Create a table from markdown table string with specified position."""
         parsed_rows = parse_markdown_table(markdown_table)
         if not parsed_rows:
             return None
@@ -192,8 +263,7 @@ class SchemaToPptxConverter:
         num_cols = len(parsed_rows[0])
         num_rows = len(parsed_rows)
 
-        # Calculate table dimensions
-        table_width = CONTENT_WIDTH
+        # Calculate table height
         table_height = num_rows * TABLE_ROW_HEIGHT
 
         # Convert parsed rows to PptxTableCellModel
@@ -207,9 +277,9 @@ class SchemaToPptxConverter:
 
         return PptxTableModel(
             position=PptxPositionModel(
-                left=MARGIN_LEFT,
+                left=left,
                 top=top,
-                width=table_width,
+                width=width,
                 height=table_height,
             ),
             rows=rows,
